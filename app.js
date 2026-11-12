@@ -25,9 +25,8 @@ fileInput.addEventListener('change', (e) => {
     return;
   }
 
-  setStatus("⏳ Chargement en cours... (iOS convertit la vidéo en arrière-plan)");
+  setStatus("⏳ Chargement en cours...");
   
-  // Un petit délai pour laisser le navigateur afficher le message avant de freezer
   setTimeout(() => {
     videoEl.src = URL.createObjectURL(file);
     videoEl.load();
@@ -35,15 +34,29 @@ fileInput.addEventListener('change', (e) => {
   }, 100);
 });
 
+// --- Correction iOS : on attend que la durée soit réelle ---
+function updateDuration() {
+  if (isFinite(videoEl.duration) && videoEl.duration > 0) {
+    duration = videoEl.duration;
+    resizeCanvas();
+    drawTimeline();
+    updateTimeDisplay();
+  }
+}
+
+// On écoute plusieurs événements pour attraper la durée quoi qu'il arrive
+videoEl.addEventListener('loadedmetadata', updateDuration);
+videoEl.addEventListener('durationchange', updateDuration);
 videoEl.addEventListener('canplay', () => {
-  // Se déclenche quand le navigateur a assez de données pour jouer
-  setStatus(`✅ Clip prêt (${(videoEl.duration).toFixed(1)} s)`);
+  updateDuration();
+  setStatus(`✅ Clip prêt (${duration.toFixed(1)} s)`);
 });
 
 // --- Gestion de la Timeline (Canvas) ---
 function resizeCanvas() {
   const dpr = window.devicePixelRatio || 1;
   const rect = canvas.getBoundingClientRect();
+  if (rect.width === 0) return; // Sécurité si le canvas est caché
   canvas.width = rect.width * dpr;
   canvas.height = rect.height * dpr;
   ctx.scale(dpr, dpr);
@@ -54,7 +67,6 @@ function drawTimeline() {
   const h = canvas.height / (window.devicePixelRatio || 1);
   
   ctx.clearRect(0, 0, w, h);
-  
   if (!duration) return;
 
   // Fond de la timeline
@@ -62,7 +74,7 @@ function drawTimeline() {
   ctx.fillRect(0, 0, w, h);
 
   // Graduations (secondes)
-  ctx.fillStyle = '#444';
+  ctx.fillStyle = '#666';
   ctx.font = '10px monospace';
   ctx.textAlign = 'center';
   
@@ -75,7 +87,7 @@ function drawTimeline() {
 }
 
 function drawPlayhead() {
-  drawTimeline(); // Redessine le fond
+  drawTimeline(); 
   if (!duration) return;
   
   const w = canvas.width / (window.devicePixelRatio || 1);
@@ -93,6 +105,7 @@ function drawPlayhead() {
 }
 
 function formatTime(s) {
+  if (!isFinite(s)) return "00:00.0";
   const m = Math.floor(s / 60);
   const sec = Math.floor(s % 60);
   const ms = Math.floor((s % 1) * 10);
@@ -116,15 +129,8 @@ function seek(e) {
   updateTimeDisplay();
 }
 
-canvas.addEventListener('pointerdown', (e) => {
-  isSeeking = true;
-  seek(e);
-});
-
-canvas.addEventListener('pointermove', (e) => {
-  if (isSeeking) seek(e);
-});
-
+canvas.addEventListener('pointerdown', (e) => { isSeeking = true; seek(e); });
+canvas.addEventListener('pointermove', (e) => { if (isSeeking) seek(e); });
 window.addEventListener('pointerup', () => { isSeeking = false; });
 
 // --- Lecture Vidéo ---
