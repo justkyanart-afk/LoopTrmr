@@ -25,17 +25,19 @@ fileInput.addEventListener('change', (e) => {
     return;
   }
 
-  videoEl.src = URL.createObjectURL(file);
-  videoEl.load();
-  playBtn.disabled = false;
-  setStatus(`Clip chargé (${(file.size / 1024 / 1024).toFixed(1)} Mo)`);
+  setStatus("⏳ Chargement en cours... (iOS convertit la vidéo en arrière-plan)");
+  
+  // Un petit délai pour laisser le navigateur afficher le message avant de freezer
+  setTimeout(() => {
+    videoEl.src = URL.createObjectURL(file);
+    videoEl.load();
+    playBtn.disabled = false;
+  }, 100);
 });
 
-videoEl.addEventListener('loadedmetadata', () => {
-  duration = videoEl.duration;
-  resizeCanvas();
-  drawTimeline();
-  updateTimeDisplay();
+videoEl.addEventListener('canplay', () => {
+  // Se déclenche quand le navigateur a assez de données pour jouer
+  setStatus(`✅ Clip prêt (${(videoEl.duration).toFixed(1)} s)`);
 });
 
 // --- Gestion de la Timeline (Canvas) ---
