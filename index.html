@@ -14,20 +14,23 @@
 <body>
   <header>
     <h1>Loop Trimmer</h1>
-    <span id="version">v0.2</span>
+    <span id="version">v0.3</span>
   </header>
 
   <main id="app">
-    <!-- Zone de lecture vidéo -->
     <div id="video-container">
       <video id="video" playsinline></video>
     </div>
 
-    <!-- Contrôles -->
+    <!-- Nouvelle zone Timeline -->
+    <div id="timeline-section">
+      <div id="time-display">00:00.0</div>
+      <canvas id="timeline-canvas"></canvas>
+    </div>
+
     <div id="controls">
-      <label for="file-input" class="btn">📁 Choisir un clip</label>
+      <label for="file-input" class="btn">📁 Choisir</label>
       <input type="file" id="file-input" accept="video/*" hidden>
-      
       <button id="play-btn" class="btn secondary" disabled>▶️ Play</button>
     </div>
   </main>
