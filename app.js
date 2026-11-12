@@ -19,17 +19,16 @@ let loopStart = 0;
 let loopEnd = 0;
 let isLooping = false;
 
-// --- Variables de Vue (Zoom & Défilement) ---
-let zoomLevel = 1; // 1 = vue totale. 10 = zoomé x10. Max = 100.
-const MAX_ZOOM = 100;
-let viewStart = 0; // Temps (en secondes) au bord gauche de l'écran
-let viewDuration = 0; // Durée visible à l'écran
+let zoomLevel = 1;
+const MAX_ZOOM = 200;
+let viewStart = 0;
+let viewDuration = 0;
 
-// --- Gestions des gestes ---
-let dragMode = null; // 'seek', 'window', 'pan'
-let dragStartX = 0;
-let dragStartLoopStart = 0;
-let dragStartViewStart = 0;
+// Gestion des gestes
+let activePointers = new Map();
+let dragMode = null; // 'seek', 'window', 'pan', 'zoom'
+let lastX = 0;
+let lastY = 0;
 let initialPinchDistance = 0;
 let initialZoomLevel = 1;
 let initialPinchCenterTime = 0;
@@ -73,14 +72,10 @@ function updateDuration() {
 videoEl.addEventListener('loadedmetadata', updateDuration);
 videoEl.addEventListener('durationchange', updateDuration);
 
-// --- Calculs Musicaux ---
 function calculateLoopSize() {
   const beatDuration = 60 / bpm;
   loopDuration = loopMeasures * 4 * beatDuration;
-  
-  if (loopStart + loopDuration > duration) {
-    loopStart = Math.max(0, duration - loopDuration);
-  }
+  if (loopStart + loopDuration > duration) loopStart = Math.max(0, duration - loopDuration);
   loopEnd = loopStart + loopDuration;
   drawPlayhead();
 }
@@ -99,7 +94,6 @@ function setMeasures(measures) {
 btn4m.onclick = () => setMeasures(4);
 btn8m.onclick = () => setMeasures(8);
 
-// --- Fonctions de conversion Vue <-> Temps ---
 function timeToX(t) {
   const w = canvas.width / (window.devicePixelRatio || 1);
   return ((t - viewStart) / viewDuration) * w;
@@ -119,18 +113,15 @@ function resizeCanvas() {
   ctx.scale(dpr, dpr);
 }
 
-// --- Dessin de la Timeline ---
 function drawTimeline() {
   const w = canvas.width / (window.devicePixelRatio || 1);
   const h = canvas.height / (window.devicePixelRatio || 1);
   ctx.clearRect(0, 0, w, h);
   if (!duration) return;
 
-  // 1. Fond
   ctx.fillStyle = '#222';
   ctx.fillRect(0, 0, w, h);
 
-  // 2. Grille Musicale (BPM)
   const beatDuration = 60 / bpm;
   const startBeat = Math.floor(viewStart / beatDuration);
   const endBeat = Math.ceil((viewStart + viewDuration) / beatDuration);
@@ -138,9 +129,7 @@ function drawTimeline() {
   for (let i = startBeat; i <= endBeat; i++) {
     const t = i * beatDuration;
     const x = timeToX(t);
-    
     if (x < 0 || x > w) continue;
-
     const isMeasure = i % 4 === 0;
     ctx.beginPath();
     ctx.lineWidth = isMeasure ? 2 : 1;
@@ -150,7 +139,6 @@ function drawTimeline() {
     ctx.stroke();
   }
 
-  // 3. Fenêtre de boucle
   const xStart = timeToX(loopStart);
   const xEnd = timeToX(loopEnd);
   
@@ -160,17 +148,15 @@ function drawTimeline() {
   ctx.lineWidth = 3;
   ctx.strokeRect(xStart, 0, xEnd - xStart, h);
 
-  // 4. Graduations (Secondes ou Millisecondes selon le zoom)
   ctx.fillStyle = '#aaa';
   ctx.font = '10px monospace';
   ctx.textAlign = 'center';
   
-  // Choix de l'intervalle selon la durée visible
   let step = 1;
   if (viewDuration > 60) step = 10;
   else if (viewDuration > 10) step = 2;
   else if (viewDuration > 2) step = 0.5;
-  else step = 0.1; // Vue très zoomée : par tranche de 100ms
+  else step = 0.1;
 
   const startTick = Math.floor(viewStart / step) * step;
   const endTick = Math.ceil((viewStart + viewDuration) / step) * step;
@@ -178,16 +164,9 @@ function drawTimeline() {
   for (let t = startTick; t <= endTick; t += step) {
     const x = timeToX(t);
     if (x < -20 || x > w + 20) continue;
-    
     ctx.fillRect(x, 0, 1, 8);
     
-    // Affichage du texte (avec les millisecondes si on est très zoomé)
-    let label;
-    if (viewDuration < 2) {
-        label = (t).toFixed(2) + 's';
-    } else {
-        label = formatTime(t).split('.')[0];
-    }
+    let label = (viewDuration < 2) ? (t).toFixed(2) + 's' : formatTime(t).split('.')[0];
     ctx.fillText(label, x, h - 5);
   }
 }
@@ -199,7 +178,6 @@ function drawPlayhead() {
   const h = canvas.height / (window.devicePixelRatio || 1);
   const x = timeToX(videoEl.currentTime);
 
-  // Ne dessiner le curseur que s'il est visible à l'écran
   if (x >= 0 && x <= w) {
     ctx.fillStyle = '#fff'; 
     ctx.fillRect(x - 1, 0, 2, h);
@@ -219,75 +197,84 @@ function updateTimeDisplay() {
   timeDisplay.textContent = `${formatTime(videoEl.currentTime)} / ${formatTime(duration)}`;
 }
 
-// --- Gestion des gestes tactiles (Pinch to Zoom) ---
-function getDistance(touches) {
-  return Math.hypot(touches[0].clientX - touches[1].clientX, touches[0].clientY - touches[1].clientY);
-}
+// ==========================================
+// NOUVELLE GESTION DES GESTES (Plus robuste)
+// ==========================================
 
 canvas.addEventListener('touchstart', (e) => {
   if (!duration) return;
-  if (e.touches.length === 2) {
-    // Début du zoom
-    dragMode = 'zoom';
-    initialPinchDistance = getDistance(e.touches);
-    initialZoomLevel = zoomLevel;
-    
-    // Garder le point central sous les doigts fixe pendant le zoom
-    const rect = canvas.getBoundingClientRect();
-    const centerX = (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left;
-    initialPinchCenterTime = xToTime(centerX);
-  } else if (e.touches.length === 1) {
-    // Gestion à un doigt
-    const rect = canvas.getBoundingClientRect();
-    const clickX = e.touches[0].clientX - rect.left;
-    const clickTime = xToTime(clickX);
+  e.preventDefault(); // Bloque le zoom/scroll natif de Safari
 
-    // Si on touche la fenêtre bleue
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    activePointers.set(e.changedTouches[i].identifier, e.changedTouches[i]);
+  }
+
+  const rect = canvas.getBoundingClientRect();
+
+  if (activePointers.size === 1) {
+    // UN SEUL DOIGT
+    const touch = e.touches[0];
+    const clickTime = xToTime(touch.clientX - rect.left);
+    
+    // Si on touche la zone bleue, on la déplace. Sinon, on déplace le curseur.
     if (clickTime >= loopStart && clickTime <= loopEnd) {
       dragMode = 'window';
-      dragStartX = e.touches[0].clientX;
-      dragStartLoopStart = loopStart;
+      lastX = touch.clientX;
     } else {
-      // Sinon, déplacement de la tête de lecture ou navigation (pan)
-      // On décide de faire du seek pour l'instant
       dragMode = 'seek';
       videoEl.currentTime = clickTime;
       drawPlayhead();
       updateTimeDisplay();
     }
+  } else if (activePointers.size === 2) {
+    // DEUX DOIGTS : On passe en mode Zoom
+    dragMode = 'zoom';
+    const touch1 = e.touches[0];
+    const touch2 = e.touches[1];
+    initialPinchDistance = Math.hypot(touch1.clientX - touch2.clientX, touch1.clientY - touch2.clientY);
+    initialZoomLevel = zoomLevel;
+    
+    const centerX = (touch1.clientX + touch2.clientX) / 2 - rect.left;
+    initialPinchCenterTime = xToTime(centerX);
   }
 }, { passive: false });
 
 canvas.addEventListener('touchmove', (e) => {
   if (!duration) return;
-  e.preventDefault(); // Empêche le zoom de la page Safari
+  e.preventDefault();
 
-  if (dragMode === 'zoom' && e.touches.length === 2) {
-    const currentDistance = getDistance(e.touches);
-    const zoomRatio = currentDistance / initialPinchDistance;
-    
-    let newZoom = initialZoomLevel * zoomRatio;
-    newZoom = Math.max(1, Math.min(newZoom, MAX_ZOOM));
-    zoomLevel = newZoom;
+  // Mettre à jour la position des doigts
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    if (activePointers.has(e.changedTouches[i].identifier)) {
+      activePointers.set(e.changedTouches[i].identifier, e.changedTouches[i]);
+    }
+  }
 
-    const rect = canvas.getBoundingClientRect();
-    const centerX = (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left;
-    
-    // Recalculer viewDuration et viewStart
-    viewDuration = duration / zoomLevel;
-    // Formule pour garder le point central stable :
-    viewStart = initialPinchCenterTime - (centerX / rect.width) * viewDuration;
-    
-    // Limites
-    viewStart = Math.max(0, Math.min(viewStart, duration - viewDuration));
-    
-    drawPlayhead();
+  const rect = canvas.getBoundingClientRect();
 
-  } else if (dragMode === 'window' && e.touches.length === 1) {
-    const rect = canvas.getBoundingClientRect();
-    const deltaX = e.touches[0].clientX - dragStartX;
-    const deltaTime = (deltaX / rect.width) * viewDuration;
-    let newStart = dragStartLoopStart + deltaTime;
+  if (dragMode === 'zoom' && activePointers.size >= 2) {
+    const touch1 = e.touches[0];
+    const touch2 = e.touches[1];
+    const currentDistance = Math.hypot(touch1.clientX - touch2.clientX, touch1.clientY - touch2.clientY);
+    
+    if (initialPinchDistance > 0) {
+      let newZoom = initialZoomLevel * (currentDistance / initialPinchDistance);
+      newZoom = Math.max(1, Math.min(newZoom, MAX_ZOOM));
+      zoomLevel = newZoom;
+
+      const centerX = (touch1.clientX + touch2.clientX) / 2 - rect.left;
+      viewDuration = duration / zoomLevel;
+      viewStart = initialPinchCenterTime - (centerX / rect.width) * viewDuration;
+      viewStart = Math.max(0, Math.min(viewStart, duration - viewDuration));
+      drawPlayhead();
+    }
+  } 
+  else if (dragMode === 'window' && activePointers.size === 1) {
+    const touch = e.touches[0];
+    const deltaX = touch.clientX - lastX;
+    lastX = touch.clientX;
+    
+    let newStart = loopStart + (deltaX / rect.width) * viewDuration;
     
     if (magneticToggle.checked) {
       const beatDuration = 60 / bpm;
@@ -298,33 +285,44 @@ canvas.addEventListener('touchmove', (e) => {
     loopStart = newStart;
     loopEnd = loopStart + loopDuration;
     drawPlayhead();
-
-  } else if (dragMode === 'seek' && e.touches.length === 1) {
-    const rect = canvas.getBoundingClientRect();
-    const clickX = e.touches[0].clientX - rect.left;
-    videoEl.currentTime = Math.max(0, Math.min(xToTime(clickX), duration));
+  }
+  else if (dragMode === 'seek' && activePointers.size === 1) {
+    const touch = e.touches[0];
+    videoEl.currentTime = Math.max(0, Math.min(xToTime(touch.clientX - rect.left), duration));
     drawPlayhead();
     updateTimeDisplay();
   }
 }, { passive: false });
 
 canvas.addEventListener('touchend', (e) => {
-  if (e.touches.length === 0) {
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    activePointers.delete(e.changedTouches[i].identifier);
+  }
+
+  if (activePointers.size === 0) {
     dragMode = null;
-  } else if (e.touches.length === 1) {
-    // Si on passe de 2 doigts à 1 doigt, on évite un saut bizarre
-    dragMode = 'seek'; 
+  } else if (activePointers.size === 1) {
+    // Si on relâche un doigt après un zoom, on repasse en mode "seek" pour éviter que ça saute
+    dragMode = 'seek';
+    lastX = e.touches[0].clientX;
   }
 });
 
-// --- Lecture et Boucle ---
+canvas.addEventListener('touchcancel', (e) => {
+  activePointers.clear();
+  dragMode = null;
+});
+
+// ==========================================
+// LECTURE ET BOUCLE
+// ==========================================
+
 function loopAnim() {
   if (!videoEl.paused) {
     if (isLooping && videoEl.currentTime >= loopEnd) {
       videoEl.currentTime = loopStart;
     }
     
-    // Auto-scroll de la vue si la tête de lecture sort de l'écran pendant la lecture
     if (videoEl.currentTime < viewStart || videoEl.currentTime > viewStart + viewDuration) {
         viewStart = Math.max(0, Math.min(videoEl.currentTime - viewDuration/2, duration - viewDuration));
     }
