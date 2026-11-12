@@ -1,4 +1,4 @@
-const CACHE = 'loop-trimmer-v0.3'; // Version mise à jour
+const CACHE = 'loop-trimmer-v0.3.1';
 const ASSETS = ['./', './index.html', './style.css', './app.js', './manifest.json'];
 
 self.addEventListener('install', (e) => {
