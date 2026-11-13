@@ -14,7 +14,7 @@
 <body>
   <header>
     <h1>Loop Trimmer</h1>
-    <span id="version">v0.4</span>
+    <span id="version">v0.6</span>
   </header>
 
   <main id="app">
@@ -27,10 +27,24 @@
       <canvas id="timeline-canvas"></canvas>
     </div>
 
-    <!-- Boutons de test pour la taille de la boucle -->
-    <div id="loop-controls">
-      <button id="btn-4s" class="btn small active">Boucle 4s</button>
-      <button id="btn-8s" class="btn small">Boucle 8s</button>
+    <!-- Zone de contrôle du BPM et des mesures -->
+    <div id="bpm-controls">
+      <div class="control-group">
+        <label>BPM</label>
+        <input type="number" id="bpm-input" value="90" min="30" max="300">
+      </div>
+      
+      <div class="control-group">
+        <label class="toggle-label">
+          <input type="checkbox" id="magnetic-toggle" checked>
+          Aimant
+        </label>
+      </div>
+
+      <div class="control-group">
+        <button id="btn-4m" class="btn small active">4 Mesures</button>
+        <button id="btn-8m" class="btn small">8 Mesures</button>
+      </div>
     </div>
 
     <div id="controls">
