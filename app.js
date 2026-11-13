@@ -10,9 +10,12 @@ const btn4m = document.getElementById('btn-4m');
 const btn8m = document.getElementById('btn-8m');
 const bpmInput = document.getElementById('bpm-input');
 const magneticToggle = document.getElementById('magnetic-toggle');
+const bipToggle = document.getElementById('bip-toggle');
+const btnOffset = document.getElementById('btn-offset');
 
 let duration = 0;
 let bpm = 90;
+let gridOffset = 0; // Décalage de la grille en secondes
 let loopMeasures = 4;
 let loopDuration = 0; 
 let loopStart = 0;
@@ -24,12 +27,18 @@ const MAX_ZOOM = 200;
 let viewStart = 0;
 let viewDuration = 0;
 
-// Gestion des gestes et de la physique (inertie)
+// Audio & Métronome
+let audioCtx = null;
+let lastPlayedBeat = -1;
+
+// Gestion des gestes
 let activePointers = new Map();
-let dragMode = null; // 'seek', 'window', 'pan', 'zoom'
+let dragMode = null; 
 let lastX = 0;
-let lastTouchX = 0; // Position absolue du doigt à l'écran
+let lastTouchX = 0; 
+let startTouchY = 0;
 let lastMoveTime = 0;
+let lastScrubTime = 0; // Pour limiter le scrubbing vidéo
 let velocityHistory = [];
 let momentumFrame = null;
 let autoScrollFrame = null;
@@ -38,6 +47,13 @@ let initialZoomLevel = 1;
 let initialPinchCenterTime = 0;
 
 function setStatus(msg) { statusEl.textContent = msg; }
+
+// Initialisation de l'audio (nécessite une action utilisateur sur iOS)
+function initAudio() {
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+}
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));
@@ -63,6 +79,7 @@ function updateDuration() {
     zoomLevel = 1;
     viewStart = 0;
     viewDuration = duration;
+    gridOffset = 0;
     calculateLoopSize();
     
     setTimeout(() => {
@@ -70,12 +87,13 @@ function updateDuration() {
       drawPlayhead();
       updateTimeDisplay();
     }, 50);
-    setStatus(`✅ Clip prêt (${duration.toFixed(1)} s) - Pincez pour zoomer`);
+    setStatus(`✅ Clip prêt (${duration.toFixed(1)} s)`);
   }
 }
 videoEl.addEventListener('loadedmetadata', updateDuration);
 videoEl.addEventListener('durationchange', updateDuration);
 
+// --- LOGIQUE DE LA GRILLE ET DU BPM ---
 function calculateLoopSize() {
   const beatDuration = 60 / bpm;
   loopDuration = loopMeasures * 4 * beatDuration;
@@ -87,6 +105,17 @@ function calculateLoopSize() {
 bpmInput.addEventListener('input', (e) => {
   bpm = parseFloat(e.target.value) || 90;
   calculateLoopSize();
+});
+
+// Bouton pour caler la grille sur le temps actuel
+btnOffset.addEventListener('click', () => {
+  // On trouve le temps du beat le plus proche de la tête de lecture
+  const currentT = videoEl.currentTime;
+  gridOffset = currentT; 
+  // On repositionne la boucle pour qu'elle commence sur ce nouveau temps
+  loopStart = currentT;
+  calculateLoopSize();
+  setStatus(`Grille calée sur ${formatTime(currentT)}`);
 });
 
 function setMeasures(measures) {
@@ -117,6 +146,7 @@ function resizeCanvas() {
   ctx.scale(dpr, dpr);
 }
 
+// --- DESSIN DE LA TIMELINE ---
 function drawTimeline() {
   const w = canvas.width / (window.devicePixelRatio || 1);
   const h = canvas.height / (window.devicePixelRatio || 1);
@@ -126,22 +156,28 @@ function drawTimeline() {
   ctx.fillStyle = '#222';
   ctx.fillRect(0, 0, w, h);
 
-  // Grille musicale
+  // Dessin de la grille musicale (avec décalage)
   const beatDuration = 60 / bpm;
-  const startBeat = Math.floor(viewStart / beatDuration);
-  const endBeat = Math.ceil((viewStart + viewDuration) / beatDuration);
-
-  for (let i = startBeat; i <= endBeat; i++) {
-    const t = i * beatDuration;
-    const x = timeToX(t);
-    if (x < 0 || x > w) continue;
-    const isMeasure = i % 4 === 0;
-    ctx.beginPath();
-    ctx.lineWidth = isMeasure ? 2 : 1;
-    ctx.strokeStyle = isMeasure ? '#555' : '#333';
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, h);
-    ctx.stroke();
+  
+  // On cherche le premier beat visible à l'écran
+  let firstBeatIndex = Math.floor((viewStart - gridOffset) / beatDuration);
+  let t = gridOffset + firstBeatIndex * beatDuration;
+  
+  while (t <= viewStart + viewDuration) {
+    if (t >= 0) {
+      const x = timeToX(t);
+      if (x >= 0 && x <= w) {
+        const isMeasure = firstBeatIndex % 4 === 0;
+        ctx.beginPath();
+        ctx.lineWidth = isMeasure ? 2 : 1;
+        ctx.strokeStyle = isMeasure ? '#555' : '#333';
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, h);
+        ctx.stroke();
+      }
+    }
+    firstBeatIndex++;
+    t = gridOffset + firstBeatIndex * beatDuration;
   }
 
   // Fenêtre bleue
@@ -154,7 +190,7 @@ function drawTimeline() {
   ctx.lineWidth = 3;
   ctx.strokeRect(xStart, 0, xEnd - xStart, h);
 
-  // Graduations intelligentes
+  // Graduations
   ctx.fillStyle = '#aaa';
   ctx.font = '10px monospace';
   ctx.textAlign = 'center';
@@ -171,11 +207,11 @@ function drawTimeline() {
   const startTick = Math.floor(viewStart / step) * step;
   const endTick = Math.ceil((viewStart + viewDuration) / step) * step;
 
-  for (let t = startTick; t <= endTick; t += step) {
-    const x = timeToX(t);
+  for (let i = startTick; i <= endTick; i += step) {
+    const x = timeToX(i);
     if (x < -30 || x > w + 30) continue;
     ctx.fillRect(x, 0, 1, 8);
-    let label = (step < 1) ? t.toFixed(2) + 's' : formatTime(t).split('.')[0];
+    let label = (step < 1) ? i.toFixed(2) + 's' : formatTime(i).split('.')[0];
     ctx.fillText(label, x, h - 5);
   }
 }
@@ -197,33 +233,51 @@ function drawPlayhead() {
 }
 
 function formatTime(s) {
-  if (!isFinite(s) || s < 0) return "00:00.0";
-  const m = Math.floor(s / 60), sec = Math.floor(s % 60), ms = Math.floor((s % 1) * 10);
-  return `${m.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}.${ms}`;
+  if (!isFinite(s) || s < 0) return "00:00.000";
+  const m = Math.floor(s / 60), sec = Math.floor(s % 60), ms = Math.floor((s % 1) * 1000);
+  return `${m.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}.${ms.toString().padStart(3, '0')}`;
 }
 
 function updateTimeDisplay() {
-  timeDisplay.textContent = `${formatTime(videoEl.currentTime)} / ${formatTime(duration)}`;
+  if (dragMode === 'window' || dragMode === 'auto-scroll') {
+    timeDisplay.textContent = `▶ Début: ${formatTime(loopStart)}`;
+    timeDisplay.style.color = '#4cd964';
+  } else {
+    timeDisplay.textContent = `${formatTime(videoEl.currentTime)} / ${formatTime(duration)}`;
+    timeDisplay.style.color = 'var(--accent)';
+  }
+}
+
+// --- JOUER LE BIP ---
+function playBip() {
+  if (!audioCtx) return;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(1000, audioCtx.currentTime); // Fréquence du bip
+  gain.gain.setValueAtTime(0.5, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.05); // Extinction rapide
+  
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+  osc.start();
+  osc.stop(audioCtx.currentTime + 0.05);
 }
 
 // ==========================================
-// PHYSIQUE : INERTIE ET AUTO-SCROLL
+// INERTIE ET AUTO-SCROLL
 // ==========================================
-
 function startMomentum(velocity) {
   cancelAnimationFrame(momentumFrame);
   let v = velocity;
-  
   function animate() {
-    if (Math.abs(v) < 0.001) return; // Seuil d'arrêt
+    if (Math.abs(v) < 0.001) return; 
     let newStart = viewStart - v;
-    
     if (newStart <= 0) { newStart = 0; v = 0; }
     else if (newStart >= duration - viewDuration) { newStart = duration - viewDuration; v = 0; }
-    
     viewStart = newStart;
     drawPlayhead();
-    v *= 0.95; // Friction (ralentissement fluide)
+    v *= 0.95; 
     momentumFrame = requestAnimationFrame(animate);
   }
   animate();
@@ -233,14 +287,12 @@ function autoScrollLoop() {
   if (dragMode !== 'window') return;
   
   const rect = canvas.getBoundingClientRect();
-  const edgeThreshold = 50; // Zone sensible de 50px sur les bords
+  const edgeThreshold = 50; 
   let scrollSpeed = 0;
   
   if (lastTouchX < rect.left + edgeThreshold) {
-     // Vers la gauche
      scrollSpeed = -((rect.left + edgeThreshold - lastTouchX) / edgeThreshold) * (viewDuration * 0.02);
   } else if (lastTouchX > rect.right - edgeThreshold) {
-     // Vers la droite
      scrollSpeed = ((lastTouchX - (rect.right - edgeThreshold)) / edgeThreshold) * (viewDuration * 0.02);
   }
 
@@ -249,10 +301,17 @@ function autoScrollLoop() {
     let actualScroll = newViewStart - viewStart;
     viewStart = newViewStart;
     
-    // La boucle suit le défilement
     loopStart = Math.max(0, Math.min(loopStart + actualScroll, duration - loopDuration));
     loopEnd = loopStart + loopDuration;
     
+    // Scrub vidéo pendant l'auto-scroll
+    const now = performance.now();
+    if (now - lastScrubTime > 50) {
+      videoEl.currentTime = loopStart;
+      lastScrubTime = now;
+    }
+    
+    updateTimeDisplay(); 
     drawPlayhead();
   }
   autoScrollFrame = requestAnimationFrame(autoScrollLoop);
@@ -261,10 +320,10 @@ function autoScrollLoop() {
 // ==========================================
 // GESTION DES GESTES
 // ==========================================
-
 canvas.addEventListener('touchstart', (e) => {
   if (!duration) return;
   e.preventDefault();
+  initAudio(); // Déverrouille l'audio iOS au premier toucher
 
   cancelAnimationFrame(momentumFrame);
   cancelAnimationFrame(autoScrollFrame);
@@ -280,12 +339,16 @@ canvas.addEventListener('touchstart', (e) => {
     const touch = e.touches[0];
     lastTouchX = touch.clientX;
     lastX = touch.clientX;
+    startTouchY = touch.clientY - rect.top;
     lastMoveTime = performance.now();
+    
     const clickTime = xToTime(touch.clientX - rect.left);
+    const isTopBand = startTouchY < 25;
 
-    if (clickTime >= loopStart && clickTime <= loopEnd) {
+    if (!isTopBand && clickTime >= loopStart && clickTime <= loopEnd) {
       dragMode = 'window';
-      autoScrollLoop(); // Démarre la vérification des bords
+      autoScrollLoop(); 
+      updateTimeDisplay();
     } else {
       if (zoomLevel > 1) {
         dragMode = 'pan';
@@ -320,7 +383,6 @@ canvas.addEventListener('touchmove', (e) => {
   const rect = canvas.getBoundingClientRect();
 
   if (dragMode === 'zoom' && activePointers.size >= 2) {
-    // ... (Code du zoom inchangé)
     const touch1 = e.touches[0];
     const touch2 = e.touches[1];
     const currentDistance = Math.hypot(touch1.clientX - touch2.clientX, touch1.clientY - touch2.clientY);
@@ -343,17 +405,20 @@ canvas.addEventListener('touchmove', (e) => {
     const deltaX = touch.clientX - lastX;
     lastX = touch.clientX;
     
-    // 1. Mouvement normal de la zone bleue
     let newStart = loopStart + (deltaX / rect.width) * viewDuration;
-    
-    if (magneticToggle.checked) {
-      const beatDuration = 60 / bpm;
-      newStart = Math.round(newStart / beatDuration) * beatDuration;
-    }
-
     newStart = Math.max(0, Math.min(newStart, duration - loopDuration));
+    
     loopStart = newStart;
     loopEnd = loopStart + loopDuration;
+    
+    // --- SCRUBBING VIDÉO (Défilement des images) ---
+    const now = performance.now();
+    if (now - lastScrubTime > 50) { // Limite à 20 fps pour la performance
+      videoEl.currentTime = loopStart;
+      lastScrubTime = now;
+    }
+    
+    updateTimeDisplay(); 
     drawPlayhead();
   }
   else if (dragMode === 'pan' && activePointers.size === 1) {
@@ -362,7 +427,6 @@ canvas.addEventListener('touchmove', (e) => {
     const deltaX = touch.clientX - lastX;
     lastX = touch.clientX;
 
-    // Calcul de la vélocité pour l'inertie
     const now = performance.now();
     const dt = now - lastMoveTime;
     if (dt > 10) {
@@ -371,7 +435,6 @@ canvas.addEventListener('touchmove', (e) => {
       lastMoveTime = now;
     }
     
-    // Déplacement
     const deltaTime = (deltaX / rect.width) * viewDuration;
     viewStart = viewStart - deltaTime;
     viewStart = Math.max(0, Math.min(viewStart, duration - viewDuration));
@@ -393,18 +456,35 @@ canvas.addEventListener('touchend', (e) => {
   if (activePointers.size === 0) {
     cancelAnimationFrame(autoScrollFrame);
     
-    // Déclenchement de l'inertie si on était en mode balayage
+    // Aimantation au relâchement
+    if (dragMode === 'window' && magneticToggle.checked) {
+      const beatDuration = 60 / bpm;
+      // Calcul du beat le plus proche en tenant compte du gridOffset
+      const relativeStart = loopStart - gridOffset;
+      const nearestBeat = Math.round(relativeStart / beatDuration);
+      loopStart = gridOffset + nearestBeat * beatDuration;
+      
+      loopStart = Math.max(0, Math.min(loopStart, duration - loopDuration));
+      loopEnd = loopStart + loopDuration;
+      
+      // On remet la vidéo exactement sur le début calé
+      videoEl.currentTime = loopStart;
+      drawPlayhead();
+    }
+
     if (dragMode === 'pan' && velocityHistory.length > 0) {
       const avgVelocity = velocityHistory.reduce((a, b) => a + b, 0) / velocityHistory.length;
-      startMomentum(avgVelocity * 16); // Multiplié par ~16ms (1 frame) pour une décélération naturelle
+      startMomentum(avgVelocity * 16); 
     }
     
     dragMode = null;
+    updateTimeDisplay(); 
   } else if (activePointers.size === 1) {
     dragMode = (zoomLevel > 1) ? 'pan' : 'seek';
     lastX = e.touches[0].clientX;
     lastTouchX = lastX;
     cancelAnimationFrame(autoScrollFrame);
+    updateTimeDisplay();
   }
 });
 
@@ -413,29 +493,46 @@ canvas.addEventListener('touchcancel', (e) => {
   dragMode = null;
   cancelAnimationFrame(autoScrollFrame);
   cancelAnimationFrame(momentumFrame);
+  updateTimeDisplay();
 });
 
 // ==========================================
 // LECTURE ET BOUCLE
 // ==========================================
-
 function loopAnim() {
   if (!videoEl.paused) {
     if (isLooping && videoEl.currentTime >= loopEnd) {
       videoEl.currentTime = loopStart;
+      lastPlayedBeat = -1; // Réinitialise pour le bip
     }
     
+    // Métronome (Bip)
+    if (bipToggle.checked && audioCtx && audioCtx.state === 'running') {
+      const beatDuration = 60 / bpm;
+      const relativeTime = videoEl.currentTime - gridOffset;
+      const currentBeatIndex = Math.floor(relativeTime / beatDuration);
+      
+      // Si on a passé un nouveau temps
+      if (currentBeatIndex !== lastPlayedBeat && currentBeatIndex >= 0) {
+        playBip();
+        lastPlayedBeat = currentBeatIndex;
+      }
+    }
+
     if (videoEl.currentTime < viewStart || videoEl.currentTime > viewStart + viewDuration) {
         viewStart = Math.max(0, Math.min(videoEl.currentTime - viewDuration/2, duration - viewDuration));
     }
 
-    drawPlayhead();
-    updateTimeDisplay();
+    if (!dragMode) {
+      drawPlayhead();
+      updateTimeDisplay();
+    }
     requestAnimationFrame(loopAnim);
   }
 }
 
 playBtn.addEventListener('click', () => {
+  initAudio();
   isLooping = false;
   loopPlayBtn.classList.remove('active-loop');
   loopPlayBtn.textContent = '🔁 Boucle';
@@ -451,6 +548,7 @@ playBtn.addEventListener('click', () => {
 });
 
 loopPlayBtn.addEventListener('click', () => {
+  initAudio();
   isLooping = !isLooping;
   if (isLooping) {
     videoEl.currentTime = loopStart;
@@ -458,6 +556,7 @@ loopPlayBtn.addEventListener('click', () => {
     playBtn.textContent = '⏸ Pause';
     loopPlayBtn.textContent = '⏹ Stop Boucle';
     loopPlayBtn.classList.add('active-loop');
+    lastPlayedBeat = -1;
     requestAnimationFrame(loopAnim);
   } else {
     videoEl.pause();
