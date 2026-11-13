@@ -14,7 +14,7 @@
 <body>
   <header>
     <h1>Loop Trimmer</h1>
-    <span id="version">v0.6</span>
+    <span id="version">v0.7</span>
   </header>
 
   <main id="app">
@@ -27,7 +27,6 @@
       <canvas id="timeline-canvas"></canvas>
     </div>
 
-    <!-- Zone de contrôle du BPM et des mesures -->
     <div id="bpm-controls">
       <div class="control-group">
         <label>BPM</label>
@@ -36,11 +35,18 @@
       
       <div class="control-group">
         <label class="toggle-label">
+          <input type="checkbox" id="bip-toggle">
+          🔊 Bip
+        </label>
+        <label class="toggle-label">
           <input type="checkbox" id="magnetic-toggle" checked>
-          Aimant
+          🧲 Aimant
         </label>
       </div>
+    </div>
 
+    <div id="bpm-controls" style="padding-top: 0;">
+      <button id="btn-offset" class="btn small">📍 Caler la grille ici</button>
       <div class="control-group">
         <button id="btn-4m" class="btn small active">4 Mesures</button>
         <button id="btn-8m" class="btn small">8 Mesures</button>
