@@ -28,7 +28,6 @@ let viewDuration = 0;
 let activePointers = new Map();
 let dragMode = null; // 'seek', 'window', 'pan', 'zoom'
 let lastX = 0;
-let lastY = 0;
 let initialPinchDistance = 0;
 let initialZoomLevel = 1;
 let initialPinchCenterTime = 0;
@@ -122,6 +121,7 @@ function drawTimeline() {
   ctx.fillStyle = '#222';
   ctx.fillRect(0, 0, w, h);
 
+  // 1. Grille Musicale (BPM)
   const beatDuration = 60 / bpm;
   const startBeat = Math.floor(viewStart / beatDuration);
   const endBeat = Math.ceil((viewStart + viewDuration) / beatDuration);
@@ -139,6 +139,7 @@ function drawTimeline() {
     ctx.stroke();
   }
 
+  // 2. Fenêtre de boucle
   const xStart = timeToX(loopStart);
   const xEnd = timeToX(loopEnd);
   
@@ -148,25 +149,36 @@ function drawTimeline() {
   ctx.lineWidth = 3;
   ctx.strokeRect(xStart, 0, xEnd - xStart, h);
 
+  // 3. Graduations intelligentes (anti-chevauchement)
   ctx.fillStyle = '#aaa';
   ctx.font = '10px monospace';
   ctx.textAlign = 'center';
   
-  let step = 1;
-  if (viewDuration > 60) step = 10;
-  else if (viewDuration > 10) step = 2;
-  else if (viewDuration > 2) step = 0.5;
-  else step = 0.1;
+  // Calcul de l'espacement idéal (pour avoir environ 4 à 6 textes à l'écran)
+  let rawStep = viewDuration / 5;
+  let mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
+  let norm = rawStep / mag;
+  let step;
+  if (norm < 1.5) step = 1 * mag;
+  else if (norm < 3.5) step = 2 * mag;
+  else if (norm < 7.5) step = 5 * mag;
+  else step = 10 * mag;
 
   const startTick = Math.floor(viewStart / step) * step;
   const endTick = Math.ceil((viewStart + viewDuration) / step) * step;
 
   for (let t = startTick; t <= endTick; t += step) {
     const x = timeToX(t);
-    if (x < -20 || x > w + 20) continue;
+    if (x < -30 || x > w + 30) continue;
+    
     ctx.fillRect(x, 0, 1, 8);
     
-    let label = (viewDuration < 2) ? (t).toFixed(2) + 's' : formatTime(t).split('.')[0];
+    let label;
+    if (step < 1) {
+        label = t.toFixed(2) + 's';
+    } else {
+        label = formatTime(t).split('.')[0];
+    }
     ctx.fillText(label, x, h - 5);
   }
 }
@@ -198,12 +210,12 @@ function updateTimeDisplay() {
 }
 
 // ==========================================
-// NOUVELLE GESTION DES GESTES (Plus robuste)
+// GESTION DES GESTES (Zoom & Balayage)
 // ==========================================
 
 canvas.addEventListener('touchstart', (e) => {
   if (!duration) return;
-  e.preventDefault(); // Bloque le zoom/scroll natif de Safari
+  e.preventDefault();
 
   for (let i = 0; i < e.changedTouches.length; i++) {
     activePointers.set(e.changedTouches[i].identifier, e.changedTouches[i]);
@@ -212,22 +224,27 @@ canvas.addEventListener('touchstart', (e) => {
   const rect = canvas.getBoundingClientRect();
 
   if (activePointers.size === 1) {
-    // UN SEUL DOIGT
     const touch = e.touches[0];
     const clickTime = xToTime(touch.clientX - rect.left);
-    
-    // Si on touche la zone bleue, on la déplace. Sinon, on déplace le curseur.
+    lastX = touch.clientX;
+
     if (clickTime >= loopStart && clickTime <= loopEnd) {
+      // Touche dans la zone bleue : on déplace la boucle
       dragMode = 'window';
-      lastX = touch.clientX;
     } else {
-      dragMode = 'seek';
-      videoEl.currentTime = clickTime;
-      drawPlayhead();
-      updateTimeDisplay();
+      // Touche en dehors de la zone bleue
+      if (zoomLevel > 1) {
+        // Si on est zoomé, on fait défiler la vue (PAN)
+        dragMode = 'pan';
+      } else {
+        // Si on n'est pas zoomé, on déplace le curseur de lecture
+        dragMode = 'seek';
+        videoEl.currentTime = clickTime;
+        drawPlayhead();
+        updateTimeDisplay();
+      }
     }
   } else if (activePointers.size === 2) {
-    // DEUX DOIGTS : On passe en mode Zoom
     dragMode = 'zoom';
     const touch1 = e.touches[0];
     const touch2 = e.touches[1];
@@ -243,7 +260,6 @@ canvas.addEventListener('touchmove', (e) => {
   if (!duration) return;
   e.preventDefault();
 
-  // Mettre à jour la position des doigts
   for (let i = 0; i < e.changedTouches.length; i++) {
     if (activePointers.has(e.changedTouches[i].identifier)) {
       activePointers.set(e.changedTouches[i].identifier, e.changedTouches[i]);
@@ -286,6 +302,18 @@ canvas.addEventListener('touchmove', (e) => {
     loopEnd = loopStart + loopDuration;
     drawPlayhead();
   }
+  else if (dragMode === 'pan' && activePointers.size === 1) {
+    // DÉFILEMENT DE LA TIMELINE
+    const touch = e.touches[0];
+    const deltaX = touch.clientX - lastX;
+    lastX = touch.clientX;
+    
+    const deltaTime = (deltaX / rect.width) * viewDuration;
+    // On recule la vue quand on tire vers la droite
+    viewStart = viewStart - deltaTime;
+    viewStart = Math.max(0, Math.min(viewStart, duration - viewDuration));
+    drawPlayhead();
+  }
   else if (dragMode === 'seek' && activePointers.size === 1) {
     const touch = e.touches[0];
     videoEl.currentTime = Math.max(0, Math.min(xToTime(touch.clientX - rect.left), duration));
@@ -302,8 +330,8 @@ canvas.addEventListener('touchend', (e) => {
   if (activePointers.size === 0) {
     dragMode = null;
   } else if (activePointers.size === 1) {
-    // Si on relâche un doigt après un zoom, on repasse en mode "seek" pour éviter que ça saute
-    dragMode = 'seek';
+    // Si on relâche un doigt après un zoom, on repasse en mode "pan" (si zoomé) ou "seek"
+    dragMode = (zoomLevel > 1) ? 'pan' : 'seek';
     lastX = e.touches[0].clientX;
   }
 });
