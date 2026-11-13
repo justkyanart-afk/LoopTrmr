@@ -24,10 +24,15 @@ const MAX_ZOOM = 200;
 let viewStart = 0;
 let viewDuration = 0;
 
-// Gestion des gestes
+// Gestion des gestes et de la physique (inertie)
 let activePointers = new Map();
 let dragMode = null; // 'seek', 'window', 'pan', 'zoom'
 let lastX = 0;
+let lastTouchX = 0; // Position absolue du doigt à l'écran
+let lastMoveTime = 0;
+let velocityHistory = [];
+let momentumFrame = null;
+let autoScrollFrame = null;
 let initialPinchDistance = 0;
 let initialZoomLevel = 1;
 let initialPinchCenterTime = 0;
@@ -121,7 +126,7 @@ function drawTimeline() {
   ctx.fillStyle = '#222';
   ctx.fillRect(0, 0, w, h);
 
-  // 1. Grille Musicale (BPM)
+  // Grille musicale
   const beatDuration = 60 / bpm;
   const startBeat = Math.floor(viewStart / beatDuration);
   const endBeat = Math.ceil((viewStart + viewDuration) / beatDuration);
@@ -139,7 +144,7 @@ function drawTimeline() {
     ctx.stroke();
   }
 
-  // 2. Fenêtre de boucle
+  // Fenêtre bleue
   const xStart = timeToX(loopStart);
   const xEnd = timeToX(loopEnd);
   
@@ -149,12 +154,11 @@ function drawTimeline() {
   ctx.lineWidth = 3;
   ctx.strokeRect(xStart, 0, xEnd - xStart, h);
 
-  // 3. Graduations intelligentes (anti-chevauchement)
+  // Graduations intelligentes
   ctx.fillStyle = '#aaa';
   ctx.font = '10px monospace';
   ctx.textAlign = 'center';
   
-  // Calcul de l'espacement idéal (pour avoir environ 4 à 6 textes à l'écran)
   let rawStep = viewDuration / 5;
   let mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
   let norm = rawStep / mag;
@@ -170,15 +174,8 @@ function drawTimeline() {
   for (let t = startTick; t <= endTick; t += step) {
     const x = timeToX(t);
     if (x < -30 || x > w + 30) continue;
-    
     ctx.fillRect(x, 0, 1, 8);
-    
-    let label;
-    if (step < 1) {
-        label = t.toFixed(2) + 's';
-    } else {
-        label = formatTime(t).split('.')[0];
-    }
+    let label = (step < 1) ? t.toFixed(2) + 's' : formatTime(t).split('.')[0];
     ctx.fillText(label, x, h - 5);
   }
 }
@@ -210,12 +207,68 @@ function updateTimeDisplay() {
 }
 
 // ==========================================
-// GESTION DES GESTES (Zoom & Balayage)
+// PHYSIQUE : INERTIE ET AUTO-SCROLL
+// ==========================================
+
+function startMomentum(velocity) {
+  cancelAnimationFrame(momentumFrame);
+  let v = velocity;
+  
+  function animate() {
+    if (Math.abs(v) < 0.001) return; // Seuil d'arrêt
+    let newStart = viewStart - v;
+    
+    if (newStart <= 0) { newStart = 0; v = 0; }
+    else if (newStart >= duration - viewDuration) { newStart = duration - viewDuration; v = 0; }
+    
+    viewStart = newStart;
+    drawPlayhead();
+    v *= 0.95; // Friction (ralentissement fluide)
+    momentumFrame = requestAnimationFrame(animate);
+  }
+  animate();
+}
+
+function autoScrollLoop() {
+  if (dragMode !== 'window') return;
+  
+  const rect = canvas.getBoundingClientRect();
+  const edgeThreshold = 50; // Zone sensible de 50px sur les bords
+  let scrollSpeed = 0;
+  
+  if (lastTouchX < rect.left + edgeThreshold) {
+     // Vers la gauche
+     scrollSpeed = -((rect.left + edgeThreshold - lastTouchX) / edgeThreshold) * (viewDuration * 0.02);
+  } else if (lastTouchX > rect.right - edgeThreshold) {
+     // Vers la droite
+     scrollSpeed = ((lastTouchX - (rect.right - edgeThreshold)) / edgeThreshold) * (viewDuration * 0.02);
+  }
+
+  if (scrollSpeed !== 0) {
+    let newViewStart = Math.max(0, Math.min(viewStart + scrollSpeed, duration - viewDuration));
+    let actualScroll = newViewStart - viewStart;
+    viewStart = newViewStart;
+    
+    // La boucle suit le défilement
+    loopStart = Math.max(0, Math.min(loopStart + actualScroll, duration - loopDuration));
+    loopEnd = loopStart + loopDuration;
+    
+    drawPlayhead();
+  }
+  autoScrollFrame = requestAnimationFrame(autoScrollLoop);
+}
+
+// ==========================================
+// GESTION DES GESTES
 // ==========================================
 
 canvas.addEventListener('touchstart', (e) => {
   if (!duration) return;
   e.preventDefault();
+
+  cancelAnimationFrame(momentumFrame);
+  cancelAnimationFrame(autoScrollFrame);
+  velocityHistory = [];
 
   for (let i = 0; i < e.changedTouches.length; i++) {
     activePointers.set(e.changedTouches[i].identifier, e.changedTouches[i]);
@@ -225,19 +278,18 @@ canvas.addEventListener('touchstart', (e) => {
 
   if (activePointers.size === 1) {
     const touch = e.touches[0];
-    const clickTime = xToTime(touch.clientX - rect.left);
+    lastTouchX = touch.clientX;
     lastX = touch.clientX;
+    lastMoveTime = performance.now();
+    const clickTime = xToTime(touch.clientX - rect.left);
 
     if (clickTime >= loopStart && clickTime <= loopEnd) {
-      // Touche dans la zone bleue : on déplace la boucle
       dragMode = 'window';
+      autoScrollLoop(); // Démarre la vérification des bords
     } else {
-      // Touche en dehors de la zone bleue
       if (zoomLevel > 1) {
-        // Si on est zoomé, on fait défiler la vue (PAN)
         dragMode = 'pan';
       } else {
-        // Si on n'est pas zoomé, on déplace le curseur de lecture
         dragMode = 'seek';
         videoEl.currentTime = clickTime;
         drawPlayhead();
@@ -250,7 +302,6 @@ canvas.addEventListener('touchstart', (e) => {
     const touch2 = e.touches[1];
     initialPinchDistance = Math.hypot(touch1.clientX - touch2.clientX, touch1.clientY - touch2.clientY);
     initialZoomLevel = zoomLevel;
-    
     const centerX = (touch1.clientX + touch2.clientX) / 2 - rect.left;
     initialPinchCenterTime = xToTime(centerX);
   }
@@ -269,6 +320,7 @@ canvas.addEventListener('touchmove', (e) => {
   const rect = canvas.getBoundingClientRect();
 
   if (dragMode === 'zoom' && activePointers.size >= 2) {
+    // ... (Code du zoom inchangé)
     const touch1 = e.touches[0];
     const touch2 = e.touches[1];
     const currentDistance = Math.hypot(touch1.clientX - touch2.clientX, touch1.clientY - touch2.clientY);
@@ -287,9 +339,11 @@ canvas.addEventListener('touchmove', (e) => {
   } 
   else if (dragMode === 'window' && activePointers.size === 1) {
     const touch = e.touches[0];
+    lastTouchX = touch.clientX;
     const deltaX = touch.clientX - lastX;
     lastX = touch.clientX;
     
+    // 1. Mouvement normal de la zone bleue
     let newStart = loopStart + (deltaX / rect.width) * viewDuration;
     
     if (magneticToggle.checked) {
@@ -303,13 +357,22 @@ canvas.addEventListener('touchmove', (e) => {
     drawPlayhead();
   }
   else if (dragMode === 'pan' && activePointers.size === 1) {
-    // DÉFILEMENT DE LA TIMELINE
     const touch = e.touches[0];
+    lastTouchX = touch.clientX;
     const deltaX = touch.clientX - lastX;
     lastX = touch.clientX;
+
+    // Calcul de la vélocité pour l'inertie
+    const now = performance.now();
+    const dt = now - lastMoveTime;
+    if (dt > 10) {
+      velocityHistory.push((deltaX / rect.width) * viewDuration / dt);
+      if (velocityHistory.length > 3) velocityHistory.shift();
+      lastMoveTime = now;
+    }
     
+    // Déplacement
     const deltaTime = (deltaX / rect.width) * viewDuration;
-    // On recule la vue quand on tire vers la droite
     viewStart = viewStart - deltaTime;
     viewStart = Math.max(0, Math.min(viewStart, duration - viewDuration));
     drawPlayhead();
@@ -328,17 +391,28 @@ canvas.addEventListener('touchend', (e) => {
   }
 
   if (activePointers.size === 0) {
+    cancelAnimationFrame(autoScrollFrame);
+    
+    // Déclenchement de l'inertie si on était en mode balayage
+    if (dragMode === 'pan' && velocityHistory.length > 0) {
+      const avgVelocity = velocityHistory.reduce((a, b) => a + b, 0) / velocityHistory.length;
+      startMomentum(avgVelocity * 16); // Multiplié par ~16ms (1 frame) pour une décélération naturelle
+    }
+    
     dragMode = null;
   } else if (activePointers.size === 1) {
-    // Si on relâche un doigt après un zoom, on repasse en mode "pan" (si zoomé) ou "seek"
     dragMode = (zoomLevel > 1) ? 'pan' : 'seek';
     lastX = e.touches[0].clientX;
+    lastTouchX = lastX;
+    cancelAnimationFrame(autoScrollFrame);
   }
 });
 
 canvas.addEventListener('touchcancel', (e) => {
   activePointers.clear();
   dragMode = null;
+  cancelAnimationFrame(autoScrollFrame);
+  cancelAnimationFrame(momentumFrame);
 });
 
 // ==========================================
